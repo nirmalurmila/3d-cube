@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3D Cube in Free Space</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@200;400;700&display=swap');
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      overflow: hidden;
+      background: #000;
+      font-family: 'Outfit', sans-serif;
+      cursor: grab;
+    }
+    body:active { cursor: grabbing; }
+    canvas { display: block; }
+
+    .vignette {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.6) 100%);
+      pointer-events: none; z-index: 5;
+    }
+
+    #info {
+      position: fixed;
+      bottom: 30px; left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255,255,255,0.35);
+      font-size: 0.8rem;
+      letter-spacing: 0.4rem;
+      text-transform: uppercase;
+      pointer-events: none;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="vignette"></div>
+  <div id="info">drag to orbit &bull; scroll to zoom</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // ─── SCENE ───
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x000008, 0.0015);
+
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 1500);
+    camera.position.set(0, 2, 8);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    document.body.prepend(renderer.domElement);
+
+    // ─── LIGHTS ───
+    const ambientLight = new THREE.AmbientLight(0x111133, 0.5);
+    scene.add(ambientLight);
+
+    const pointLight1 = new THREE.PointLight(0x7850ff, 3, 50);
+    pointLight1.castShadow = true;
+    scene.add(pointLight1);
+
+    const pointLight2 = new THREE.PointLight(0xff3296, 2.5, 50);
+    scene.add(pointLight2);
+
+    const pointLight3 = new THREE.PointLight(0x00c8ff, 2, 50);
+    scene.add(pointLight3);
+
+    // ─── CUBE ───
+    const cubeSize = 2;
+    const cubeGeo = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize, 1, 1, 1);
+
+    // Custom shader material for the cube — iridescent glass look
+    const cubeMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uLight1: { value: new THREE.Vector3() },
+        uLight2: { value: new THREE.Vector3() },
+        uLight3: { value: new THREE.Vector3() },
+        uCameraPos: { value: new THREE.Vector3() }
+      },
+      vertexShader: `
+        varying vec3 vNormal;
+        varying vec3 vWorldPos;
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          vNormal = normalize(normalMatrix * normal);
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldPos = worldPos.xyz;
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        uniform vec3 uLight1;
+        uniform vec3 uLight2;
+        uniform vec3 uLight3;
+        uniform vec3 uCameraPos;
+        varying vec3 vNormal;
+        varying vec3 vWorldPos;
+        varying vec2 vUv;
+
+        void main() {
+          vec3 viewDir = normalize(uCameraPos - vWorldPos);
+          float fresnel = pow(1.0 - max(dot(viewDir, vNormal), 0.0), 3.0);
+
+          // Edge glow
+          float edge = smoothstep(0.0, 0.15, abs(vUv.x - 0.5) > 0.42 ? 1.0 : 0.0)
+                     + smoothstep(0.0, 0.15, abs(vUv.y - 0.5) > 0.42 ? 1.0 : 0.0);
+          edge = min(edge, 1.0);
+
+          // Lighting from three colored point lights
+          vec3 L1 = normalize(uLight1 - vWorldPos);
+          vec3 L2 = normalize(uLight2 - vWorldPos);
+          vec3 L3 = normalize(uLight3 - vWorldPos);
+
+          float diff1 = max(dot(vNormal, L1), 0.0);
+          float diff2 = max(dot(vNormal, L2), 0.0);
+          float diff3 = max(dot(vNormal, L3), 0.0);
+
+          vec3 H1 = normalize(L1 + viewDir);
+          vec3 H2 = normalize(L2 + viewDir);
+          vec3 H3 = normalize(L3 + viewDir);
+
+          float spec1 = pow(max(dot(vNormal, H1), 0.0), 64.0);
+          float spec2 = pow(max(dot(vNormal, H2), 0.0), 64.0);
+          float spec3 = pow(max(dot(vNormal, H3), 0.0), 64.0);
+
+          vec3 col1 = vec3(0.47, 0.31, 1.0);
+          vec3 col2 = vec3(1.0, 0.2, 0.6);
+          vec3 col3 = vec3(0.0, 0.8, 1.0);
+
+          vec3 diffuse = col1 * diff1 + col2 * diff2 + col3 * diff3;
+          vec3 specular = col1 * spec1 + col2 * spec2 + col3 * spec3;
+
+          // Iridescent shift
+          float iriShift = fresnel * 2.0 + uTime * 0.3;
+          vec3 iridescence = vec3(
+            0.5 + 0.5 * sin(iriShift),
+            0.5 + 0.5 * sin(iriShift + 2.094),
+            0.5 + 0.5 * sin(iriShift + 4.188)
+          );
+
+          // Compose
+          vec3 baseColor = vec3(0.02, 0.02, 0.06);
+          vec3 color = baseColor + diffuse * 0.4 + specular * 1.5;
+          color += iridescence * fresnel * 0.5;
+          color += vec3(0.4, 0.2, 1.0) * edge * 0.6;
+          color += fresnel * vec3(0.3, 0.5, 1.0) * 0.4;
+
+          float alpha = 0.55 + fresnel * 0.35 + edge * 0.1;
+          gl_FragColor = vec4(color, alpha);
+        }
+      `,
+      transparent: true,
+      side: THREE.DoubleSide,
+      blending: THREE.NormalBlending,
+      depthWrite: false
+    });
+
+    const cube = new THREE.Mesh(cubeGeo, cubeMat);
+    cube.castShadow = true;
+    scene.add(cube);
+
+    // ─── WIREFRAME OVERLAY ───
+    const wireGeo = new THREE.EdgesGeometry(cubeGeo);
+    const wireMat = new THREE.LineBasicMaterial({ color: 0x8866ff, transparent: true, opacity: 0.7 });
+    const wireframe = new THREE.LineSegments(wireGeo, wireMat);
+    cube.add(wireframe);
+
+    // ─── PARTICLE TRAIL ───
+    const trailCount = 4000;
+    const trailPositions = new Float32Array(trailCount * 3);
+    const trailColors = new Float32Array(trailCount * 3);
+    const trailSizes = new Float32Array(trailCount);
+    const trailVelocities = [];
+
+    for (let i = 0; i < trailCount; i++) {
+      trailPositions[i * 3] = (Math.random() - 0.5) * 0.5;
+      trailPositions[i * 3 + 1] = (Math.random() - 0.5) * 0.5;
+      trailPositions[i * 3 + 2] = (Math.random() - 0.5) * 0.5;
+      trailSizes[i] = Math.random() * 2 + 0.5;
+      trailVelocities.push({
+        x: (Math.random() - 0.5) * 0.06,
+        y: (Math.random() - 0.5) * 0.06,
+        z: (Math.random() - 0.5) * 0.06,
+        life: Math.random(),
+        maxLife: 1 + Math.random() * 3
+      });
+    }
+
+    const trailGeo = new THREE.BufferGeometry();
+    trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+    trailGeo.setAttribute('color', new THREE.BufferAttribute(trailColors, 3));
+    trailGeo.setAttribute('size', new THREE.BufferAttribute(trailSizes, 1));
+
+    const trailMat = new THREE.ShaderMaterial({
+      vertexShader: `
+        attribute float size;
+        attribute vec3 color;
+        varying vec3 vColor;
+        varying float vAlpha;
+        void main() {
+          vColor = color;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          float dist = length(mv.xyz);
+          vAlpha = smoothstep(80.0, 2.0, dist);
+          gl_PointSize = size * (120.0 / -mv.z);
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vColor;
+        varying float vAlpha;
+        void main() {
+          float d = length(gl_PointCoord - vec2(0.5));
+          if (d > 0.5) discard;
+          float glow = exp(-d * 5.0);
+          gl_FragColor = vec4(vColor * glow, glow * vAlpha * 0.7);
+        }
+      `,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+
+    const trailParticles = new THREE.Points(trailGeo, trailMat);
+    scene.add(trailParticles);
+
+    // ─── BACKGROUND STARS ───
+    const starCount = 5000;
+    const starGeo = new THREE.BufferGeometry();
+    const starPos = new Float32Array(starCount * 3);
+    const starCols = new Float32Array(starCount * 3);
+    for (let i = 0; i < starCount; i++) {
+      starPos[i * 3] = (Math.random() - 0.5) * 800;
+      starPos[i * 3 + 1] = (Math.random() - 0.5) * 800;
+      starPos[i * 3 + 2] = (Math.random() - 0.5) * 800;
+      const b = 0.4 + Math.random() * 0.6;
+      starCols[i * 3] = b * (0.7 + Math.random() * 0.3);
+      starCols[i * 3 + 1] = b * (0.7 + Math.random() * 0.3);
+      starCols[i * 3 + 2] = b;
+    }
+    starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+    starGeo.setAttribute('color', new THREE.BufferAttribute(starCols, 3));
+    const starMat = new THREE.PointsMaterial({ size: 0.8, vertexColors: true, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending });
+    scene.add(new THREE.Points(starGeo, starMat));
+
+    // ─── CUBE PATH — Lissajous 3D curve ───
+    const path = {
+      x: (t) => Math.sin(t * 0.4) * 6,
+      y: (t) => Math.sin(t * 0.5 + 1.2) * 3,
+      z: (t) => Math.cos(t * 0.3 + 0.7) * 5
+    };
+
+    // ─── ORBIT CONTROLS (simple) ───
+    let isDragging = false;
+    let prevMouse = { x: 0, y: 0 };
+    let orbit = { theta: 0, phi: Math.PI / 6 };
+    let orbitRadius = 12;
+
+    renderer.domElement.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      prevMouse.x = e.clientX;
+      prevMouse.y = e.clientY;
+    });
+    renderer.domElement.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - prevMouse.x;
+      const dy = e.clientY - prevMouse.y;
+      orbit.theta -= dx * 0.005;
+      orbit.phi = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, orbit.phi + dy * 0.005));
+      prevMouse.x = e.clientX;
+      prevMouse.y = e.clientY;
+    });
+    renderer.domElement.addEventListener('mouseup', () => isDragging = false);
+    renderer.domElement.addEventListener('mouseleave', () => isDragging = false);
+    renderer.domElement.addEventListener('wheel', (e) => {
+      orbitRadius = Math.max(5, Math.min(30, orbitRadius + e.deltaY * 0.01));
+    });
+
+    // Touch support
+    renderer.domElement.addEventListener('touchstart', (e) => {
+      isDragging = true;
+      prevMouse.x = e.touches[0].clientX;
+      prevMouse.y = e.touches[0].clientY;
+    });
+    renderer.domElement.addEventListener('touchmove', (e) => {
+      if (!isDragging) return;
+      const dx = e.touches[0].clientX - prevMouse.x;
+      const dy = e.touches[0].clientY - prevMouse.y;
+      orbit.theta -= dx * 0.005;
+      orbit.phi = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, orbit.phi + dy * 0.005));
+      prevMouse.x = e.touches[0].clientX;
+      prevMouse.y = e.touches[0].clientY;
+    });
+    renderer.domElement.addEventListener('touchend', () => isDragging = false);
+
+    // ─── ANIMATION ───
+    const clock = new THREE.Clock();
+    let prevCubePos = new THREE.Vector3();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
+
+      // ── Move cube along 3D Lissajous path ──
+      const cubeX = path.x(t);
+      const cubeY = path.y(t);
+      const cubeZ = path.z(t);
+      cube.position.set(cubeX, cubeY, cubeZ);
+
+      // Tumble rotation
+      cube.rotation.x = t * 0.7;
+      cube.rotation.y = t * 0.9;
+      cube.rotation.z = t * 0.5;
+
+      // ── Orbit lights around the cube ──
+      pointLight1.position.set(
+        cubeX + Math.sin(t * 1.3) * 6,
+        cubeY + Math.cos(t * 0.8) * 4,
+        cubeZ + Math.sin(t * 1.1 + 1) * 5
+      );
+      pointLight2.position.set(
+        cubeX + Math.cos(t * 0.9) * 5,
+        cubeY + Math.sin(t * 1.2 + 2) * 3,
+        cubeZ + Math.cos(t * 0.7 + 3) * 6
+      );
+      pointLight3.position.set(
+        cubeX + Math.sin(t * 0.6 + 4) * 4,
+        cubeY + Math.cos(t * 1.0) * 5,
+        cubeZ + Math.sin(t * 1.4 + 1) * 4
+      );
+
+      // Update shader uniforms
+      cubeMat.uniforms.uTime.value = t;
+      cubeMat.uniforms.uLight1.value.copy(pointLight1.position);
+      cubeMat.uniforms.uLight2.value.copy(pointLight2.position);
+      cubeMat.uniforms.uLight3.value.copy(pointLight3.position);
+      cubeMat.uniforms.uCameraPos.value.copy(camera.position);
+
+      // Wireframe pulse
+      wireMat.opacity = 0.4 + Math.sin(t * 3) * 0.3;
+      const hue = (t * 0.05) % 1;
+      wireMat.color.setHSL(hue, 0.8, 0.6);
+
+      // ── Update trail particles ──
+      const tpArr = trailGeo.attributes.position.array;
+      const tcArr = trailGeo.attributes.color.array;
+      for (let i = 0; i < trailCount; i++) {
+        const v = trailVelocities[i];
+        v.life += 0.016;
+
+        if (v.life > v.maxLife) {
+          // Respawn at cube
+          tpArr[i * 3]     = cubeX + (Math.random() - 0.5) * cubeSize;
+          tpArr[i * 3 + 1] = cubeY + (Math.random() - 0.5) * cubeSize;
+          tpArr[i * 3 + 2] = cubeZ + (Math.random() - 0.5) * cubeSize;
+          v.life = 0;
+          v.maxLife = 1 + Math.random() * 3;
+          const speed = 0.03 + Math.random() * 0.04;
+          const angle1 = Math.random() * Math.PI * 2;
+          const angle2 = Math.random() * Math.PI * 2;
+          v.x = Math.cos(angle1) * Math.cos(angle2) * speed;
+          v.y = Math.sin(angle2) * speed;
+          v.z = Math.sin(angle1) * Math.cos(angle2) * speed;
+        }
+
+        tpArr[i * 3]     += v.x;
+        tpArr[i * 3 + 1] += v.y;
+        tpArr[i * 3 + 2] += v.z;
+
+        // Color based on life
+        const lifeRatio = v.life / v.maxLife;
+        const fade = 1 - lifeRatio;
+        const h = (0.7 + lifeRatio * 0.3) % 1;
+        const c = new THREE.Color().setHSL(h, 0.9, 0.5 + fade * 0.3);
+        tcArr[i * 3]     = c.r * fade;
+        tcArr[i * 3 + 1] = c.g * fade;
+        tcArr[i * 3 + 2] = c.b * fade;
+      }
+      trailGeo.attributes.position.needsUpdate = true;
+      trailGeo.attributes.color.needsUpdate = true;
+
+      // ── Camera ──
+      if (!isDragging) {
+        orbit.theta += 0.003;
+      }
+
+      const camTarget = new THREE.Vector3(cubeX, cubeY, cubeZ);
+      camera.position.x = camTarget.x + Math.sin(orbit.theta) * Math.cos(orbit.phi) * orbitRadius;
+      camera.position.y = camTarget.y + Math.sin(orbit.phi) * orbitRadius;
+      camera.position.z = camTarget.z + Math.cos(orbit.theta) * Math.cos(orbit.phi) * orbitRadius;
+      camera.lookAt(camTarget);
+
+      prevCubePos.set(cubeX, cubeY, cubeZ);
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // ─── RESIZE ───
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>
